@@ -1,0 +1,147 @@
+plugins {
+    id 'application'
+    id 'com.gradleup.shadow' version '9.2.2'
+}
+
+group = 'demo'
+version = '0.1.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
+}
+
+dependencies {
+    implementation 'io.agentscope:agentscope-harness:2.0.0-RC1'
+    implementation 'org.jline:jline:4.1.3'
+    implementation 'org.slf4j:slf4j-simple:2.0.17'
+}
+
+application {
+    mainClass = 'build.orbit.Orbit'
+    applicationDefaultJvmArgs = [
+        '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn'
+    ]
+}
+
+run {
+    standardInput = System.in
+}
+
+shadowJar {
+    archiveClassifier = 'all'
+    mergeServiceFiles()
+}
+
+def orbitMainJar = "orbit-${version}-all.jar"
+def orbitPackageDir = layout.buildDirectory.dir('jpackage')
+def orbitRuntimeDir = layout.buildDirectory.dir('runtime/orbit')
+def orbitJdepsModulesFile = layout.buildDirectory.file('jdeps/orbit-modules.txt')
+def orbitExtraRuntimeModules = ['jdk.crypto.ec']
+
+tasks.register('jdepsOrbit') {
+    dependsOn shadowJar
+    group = 'distribution'
+    description = 'Analyze Orbit runtime modules with jdeps.'
+
+    outputs.file orbitJdepsModulesFile
+
+    doLast {
+        def result = providers.exec {
+            commandLine "${System.getProperty('java.home')}/bin/jdeps",
+                    '--ignore-missing-deps',
+                    '--multi-release', java.sourceCompatibility.majorVersion,
+                    '--print-module-deps',
+                    layout.buildDirectory.file("libs/${orbitMainJar}").get().asFile.absolutePath
+        }
+
+        def rawModules = result.standardOutput.asText.get().trim()
+        def detectedModules = rawModules
+                .split('[,\\r\\n]+')
+                .collect { it.trim() }
+                .findAll { it ==~ /[A-Za-z0-9_.]+/ }
+        if (detectedModules.isEmpty()) {
+            throw new GradleException('jdeps did not return any Java modules')
+        }
+
+        def mergedModules = detectedModules
+                .plus(orbitExtraRuntimeModules)
+                .collect { it.trim() }
+                .findAll { !it.isBlank() }
+                .unique()
+                .sort()
+                .join(',')
+
+        def modulesFile = orbitJdepsModulesFile.get().asFile
+        modulesFile.parentFile.mkdirs()
+        modulesFile.text = mergedModules + System.lineSeparator()
+        logger.lifecycle("Orbit runtime modules: ${mergedModules}")
+    }
+}
+
+tasks.register('jlinkOrbitRuntime', Exec) {
+    dependsOn jdepsOrbit
+    group = 'distribution'
+    description = 'Build a trimmed Java runtime for Orbit with jlink.'
+
+    doFirst {
+        delete orbitRuntimeDir
+        mkdir orbitRuntimeDir.get().asFile.parentFile
+        args '--add-modules', orbitJdepsModulesFile.get().asFile.text.trim()
+    }
+
+    executable = "${System.getProperty('java.home')}/bin/jlink"
+    args '--strip-debug',
+            '--no-header-files',
+            '--no-man-pages',
+            '--compress', 'zip-6',
+            '--output', orbitRuntimeDir.get().asFile.absolutePath
+}
+
+tasks.register('packageOrbitImage', Exec) {
+    dependsOn shadowJar, jlinkOrbitRuntime
+    group = 'distribution'
+    description = 'Build a self-contained Orbit app image with the jlink runtime.'
+
+    doFirst {
+        delete orbitPackageDir
+        mkdir orbitPackageDir.get().asFile
+    }
+
+    executable = "${System.getProperty('java.home')}/bin/jpackage"
+    args '--type', 'app-image',
+            '--name', 'orbit',
+            '--dest', orbitPackageDir.get().asFile.absolutePath,
+            '--input', layout.buildDirectory.dir('libs').get().asFile.absolutePath,
+            '--runtime-image', orbitRuntimeDir.get().asFile.absolutePath,
+            '--main-jar', orbitMainJar,
+            '--main-class', application.mainClass.get(),
+            '--java-options', '-Dfile.encoding=UTF-8',
+            '--java-options', '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn'
+}
+
+tasks.register('packageOrbitInstaller', Exec) {
+    dependsOn shadowJar, jlinkOrbitRuntime
+    group = 'distribution'
+    description = 'Build a native installer with the jlink runtime. Run on Windows to produce a Windows installer.'
+
+    doFirst {
+        delete orbitPackageDir
+        mkdir orbitPackageDir.get().asFile
+    }
+
+    def os = org.gradle.internal.os.OperatingSystem.current()
+    def packageType = os.isWindows() ? 'exe' : os.isMacOsX() ? 'dmg' : 'deb'
+
+    executable = "${System.getProperty('java.home')}/bin/jpackage"
+    args '--type', packageType,
+            '--name', 'orbit',
+            '--app-version', version.toString(),
+            '--dest', orbitPackageDir.get().asFile.absolutePath,
+            '--input', layout.buildDirectory.dir('libs').get().asFile.absolutePath,
+            '--runtime-image', orbitRuntimeDir.get().asFile.absolutePath,
+            '--main-jar', orbitMainJar,
+            '--main-class', application.mainClass.get(),
+            '--java-options', '-Dfile.encoding=UTF-8',
+            '--java-options', '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn'
+}
