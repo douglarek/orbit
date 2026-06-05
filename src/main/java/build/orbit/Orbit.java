@@ -17,7 +17,13 @@ import org.jline.terminal.TerminalBuilder;
 
 public class Orbit {
     public static void main(String[] args) throws Exception {
-        AppConfig config = AppConfig.from(args);
+        AppConfig config;
+        try {
+            config = AppConfig.from(args);
+        } catch (RuntimeException error) {
+            System.out.println("Configuration error: " + rootMessage(error));
+            return;
+        }
         WorkspaceConfig workspace = WorkspaceConfig.load(config.projectRoot(), config.configDir());
         SystemPromptConfig systemPrompt = SystemPromptConfig.load(config.configDir());
 
@@ -30,6 +36,10 @@ public class Orbit {
         System.out.println("Model: " + config.model());
         System.out.println("Thinking: "
                 + (config.enableThinking() == null ? "provider default" : config.enableThinking()));
+        if (config.model().startsWith("openai:") || config.model().startsWith("openai-compatible:")) {
+            System.out.println("OpenAI base URL: "
+                    + (config.openAiBaseUrl() == null ? "provider default" : config.openAiBaseUrl()));
+        }
         System.out.println("Session: " + config.sessionId());
         System.out.println("Agent: " + config.agentName());
         System.out.println("Config: " + config.configDir());

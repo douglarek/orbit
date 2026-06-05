@@ -4,6 +4,8 @@ import build.orbit.config.AppConfig;
 import build.orbit.config.SystemPromptConfig;
 import build.orbit.config.WorkspaceConfig;
 import io.agentscope.core.model.DashScopeChatModel;
+import io.agentscope.core.model.ModelRegistry;
+import io.agentscope.core.model.OpenAIChatModel;
 import io.agentscope.harness.agent.filesystem.spec.LocalFilesystemSpec;
 import io.agentscope.harness.agent.HarnessAgent;
 
@@ -25,26 +27,51 @@ public final class AgentFactory {
             builder.additionalContextFile(contextFile);
         }
 
-        if (config.model().startsWith("dashscope:") && config.enableThinking() != null) {
-            builder.model(buildDashScopeModel(config));
-        } else {
-            builder.model(config.model());
+        registerModelFactories(config);
+        builder.model(config.model());
+
+        return builder.build();
+    }
+
+    private static void registerModelFactories(AppConfig config) {
+        ModelRegistry.registerFactory("dashscope:.*", modelId -> buildDashScopeModel(config, modelId));
+        ModelRegistry.registerFactory("openai:.*", modelId -> buildOpenAiCompatibleModel(config, modelId));
+        ModelRegistry.registerFactory(
+                "openai-compatible:.*", modelId -> buildOpenAiCompatibleModel(config, modelId));
+    }
+
+    private static OpenAIChatModel buildOpenAiCompatibleModel(AppConfig config, String modelId) {
+        String apiKey = config.openAiApiKey();
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new IllegalStateException(
+                    "openai.apiKey is required in " + config.configFile() + " for " + modelId);
+        }
+
+        OpenAIChatModel.Builder builder = OpenAIChatModel.builder()
+                .apiKey(apiKey)
+                .modelName(modelId.substring(modelId.indexOf(':') + 1))
+                .stream(true);
+
+        if (config.openAiBaseUrl() != null && !config.openAiBaseUrl().isBlank()) {
+            builder.baseUrl(config.openAiBaseUrl());
+        }
+        if (config.openAiEndpointPath() != null && !config.openAiEndpointPath().isBlank()) {
+            builder.endpointPath(config.openAiEndpointPath());
         }
 
         return builder.build();
     }
 
-    private static DashScopeChatModel buildDashScopeModel(AppConfig config) {
-        String apiKey = System.getenv("DASHSCOPE_API_KEY");
+    private static DashScopeChatModel buildDashScopeModel(AppConfig config, String modelId) {
+        String apiKey = config.dashScopeApiKey();
         if (apiKey == null || apiKey.isBlank()) {
             throw new IllegalStateException(
-                    "Environment variable DASHSCOPE_API_KEY is required for " + config.model());
+                    "dashscope.apiKey is required in " + config.configFile() + " for " + modelId);
         }
 
-        String modelName = config.model().substring("dashscope:".length());
         return DashScopeChatModel.builder()
                 .apiKey(apiKey)
-                .modelName(modelName)
+                .modelName(modelId.substring(modelId.indexOf(':') + 1))
                 .stream(true)
                 .enableThinking(config.enableThinking())
                 .endpointType(config.dashScopeEndpoint())
