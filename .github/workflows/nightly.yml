@@ -1,0 +1,112 @@
+name: Nightly
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Package ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x64
+            archive: orbit-nightly-linux-x64.tar.gz
+          - os: macos-latest
+            name: macos-arm64
+            archive: orbit-nightly-macos-arm64.tar.gz
+          - os: windows-latest
+            name: windows-x64
+            archive: orbit-nightly-windows-x64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Package app image
+        run: ./gradlew packageOrbitImage
+
+      - name: Archive app image
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          tar -czf "dist/${{ matrix.archive }}" -C build/jpackage .
+
+      - name: Archive app image
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path build/jpackage/* -DestinationPath "dist/${{ matrix.archive }}" -Force
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: orbit-nightly-${{ matrix.name }}
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish nightly release
+    needs: package
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download packages
+        uses: actions/download-artifact@v6
+        with:
+          pattern: orbit-nightly-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh release delete nightly --yes --cleanup-tag || true
+          git tag --force nightly "$GITHUB_SHA"
+          git push --force origin refs/tags/nightly
+
+          mapfile -t files < <(find dist -type f | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No package files found in dist" >&2
+            exit 1
+          fi
+
+          gh release create nightly "${files[@]}" \
+            --title "Nightly" \
+            --notes "Automated nightly build from ${GITHUB_SHA}." \
+            --prerelease \
+            --verify-tag
